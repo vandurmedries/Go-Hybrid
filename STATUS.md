@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor (2026-11-10): restored four broken example fixtures; full pinned Linux CI 42818012651 passes, including all ten examples. Combined compiler/corpus/triage validation is running. W4176 spike excluded after source-hash allowlist and corpus mismatch audit; see PLAN.md.
+- Contributor (2026-11-10): restored four broken example fixtures; full pinned Linux CI 42818012651 passes, including all ten examples. Combined pinned Linux CI 42818634300 also passes: 3301 Rust tests, corpus 141/141, differential FULL AGREEMENT, runtime checks and all ten examples. Example-restoration draft PR #4335 awaits review. W4176 spike excluded after source-hash allowlist and corpus mismatch audit; see PLAN.md.
 
 - Contributor (2026-11-07): runtime Cargo builds now resolve relative `CARGO_TARGET_DIR` from the caller, matching staticlib discovery. Four CLI regressions pass (two failed before); real Cargo smoke passes all four path modes and fresh reuse. Pinned macOS validation on `4cda40a`: workspace 2945/2945, corpus 135/135, differential 45/45 + 90/90 and guards pass. Hosted CI/review pending; see PLAN.md.
 - Contributor (2026-11-07): `hyb build` preserves unmarked/unreadable Go sidecars before compilation; marked outputs remain reusable, while legacy unmarked output requires explicit migration. Six CLI regressions, pinned macOS workspace 2947/2947, corpus 135/135 and differential 45/45 + 90/90 pass. Hosted CI/review pending; see PLAN.md.
