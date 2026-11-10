@@ -1492,6 +1492,23 @@ impl<'a> Collector<'a> {
         callee: &Expr,
         args: &[CallArg],
     ) -> Option<Vec<Option<&'static str>>> {
+        if let Expr::Field { base, name, .. } = unwrap_parens(callee) {
+            if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                if self.lookup_kind(pkg).is_none()
+                    && !self.scopes.iter().any(|layer| layer.contains_key(pkg.as_str()))
+                {
+                    let head = Checker::base_named_type_str(name);
+                    let assoc_key = format!("{}.{}", pkg, head);
+                    if let Some(fd) = self.ck.fns.get(assoc_key.as_str()) {
+                        if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                            return None;
+                        }
+                        return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+                    }
+                }
+            }
+            return None;
+        }
         let Expr::Ident { name, .. } = unwrap_parens(callee) else {
             return None;
         };
@@ -2636,9 +2653,26 @@ impl<'a> Collector<'a> {
                         self.check_user_fn_arg_types(name, args);
                     }
                     Expr::Field { base, name, .. } => {
-                        let bk = self.kind_of_expr(base);
-                        self.check_method_arity(&bk, name, args, *span);
-                        self.check_method_arg_types(&bk, name, args);
+                        let mut handled_assoc = false;
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            if self.lookup_kind(pkg).is_none()
+                                && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                            {
+                                let head = Checker::base_named_type_str(name);
+                                let assoc_key = format!("{}.{}", pkg, head);
+                                let raw_assoc = format!("{}.{}", pkg, name);
+                                if self.ck.fns.contains_key(assoc_key.as_str()) {
+                                    self.check_user_fn_arity(&raw_assoc, args, *span);
+                                    self.check_user_fn_arg_types(&raw_assoc, args);
+                                    handled_assoc = true;
+                                }
+                            }
+                        }
+                        if !handled_assoc {
+                            let bk = self.kind_of_expr(base);
+                            self.check_method_arity(&bk, name, args, *span);
+                            self.check_method_arg_types(&bk, name, args);
+                        }
                     }
                     Expr::FnLit { params, .. } => {
                         self.check_fn_lit_call(params, args, callee, *span);
@@ -4148,6 +4182,25 @@ impl<'a> Collector<'a> {
                         Some(params),
                     );
                 }
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none()
+                        && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                    {
+                        let head = Checker::base_named_type_str(name);
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if let Some(f) = self.ck.fns.get(assoc_key.as_str()) {
+                            if f.type_params.is_empty() {
+                                return OpKind::Fn(
+                                    f.results
+                                        .iter()
+                                        .map(|r| self.kind_of_ty(&r.ty, 0))
+                                        .collect(),
+                                    Some(f.params.iter().map(|p| self.param_kind(p, 0)).collect()),
+                                );
+                            }
+                        }
+                    }
+                }
                 OpKind::Unknown
             }
             Expr::StructLit { ty, .. } => ty
@@ -4288,6 +4341,21 @@ impl<'a> Collector<'a> {
                                 .map(|r| self.kind_of_ty(&r.ty, 0))
                                 .collect(),
                         );
+                    }
+                }
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none()
+                        && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                    {
+                        let assoc_key = format!("{}.{}", pkg, head);
+                        if let Some(f) = self.ck.fns.get(assoc_key.as_str()) {
+                            return Some(
+                                f.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
                     }
                 }
                 if let Some(OpKind::Fn(res, _)) = self.struct_field_kind(&bk, name) {
@@ -8589,10 +8657,22 @@ impl<'a> Collector<'a> {
                         self.check_io_call_buildable(name, args, span);
                     }
 
-                    if self.lookup_kind(pkg).is_none() {
+                    if (pkg == "hex" || pkg == "encoding/hex") && self.lookup_kind(pkg).is_none() {
+                        self.check_hex_call_buildable(name, args, span);
+                    }
+
+                    if self.lookup_kind(pkg).is_none()
+                        && !self.scopes.iter().any(|s| s.contains_key(pkg.as_str()))
+                    {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
+                        let raw_assoc = format!("{}.{}", pkg, name);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
+                        if self.ck.fns.contains_key(assoc_key.as_str()) {
+                            self.check_user_fn_arity(&raw_assoc, args, span);
+                            self.check_user_fn_arg_types(&raw_assoc, args);
+                            return;
+                        }
                     }
                 }
                 if let Some(m) = self.method_expr_decl(base, name) {
@@ -9991,6 +10071,248 @@ impl<'a> Collector<'a> {
                         "`io.multi_writer` requires at least 1 writer argument `(writers...)`, got 0 (HYB-E1002)".to_string(),
                         "write `io.multi_writer(w1, ...)`",
                     );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_hex_call_buildable(&mut self, name: &str, args: &[CallArg], span: Span) {
+        match name {
+            "err_length" => {
+                self.emit_e1002(
+                    span,
+                    "cannot call non-function package error `hex.err_length` (HYB-E1002)".to_string(),
+                    "`hex.err_length` is a package error variable, not a callable function",
+                );
+            }
+            "encode" => {
+                // Arity != 1 is already enforced by the SPEC M5 `hex.encode(src)` check above;
+                // validate named parameter identifier when 1 argument is supplied.
+                if args.len() == 1 {
+                    if let Some(ref n) = args[0].name {
+                        if n != "src" {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`hex.encode` has no parameter named `{}` (params: src) (HYB-E1002)",
+                                    n
+                                ),
+                                "pass argument by position or use parameter name `src`",
+                            );
+                        }
+                    }
+                }
+            }
+            "encode_to_string" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.encode_to_string` takes exactly 1 argument `(src)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.encode_to_string(src)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "src" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encode_to_string` has no parameter named `{}` (params: src) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `src`",
+                        );
+                    }
+                }
+            }
+            "decode_string" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.decode_string` takes exactly 1 argument `(s)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.decode_string(s)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "s" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.decode_string` has no parameter named `{}` (params: s) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `s`",
+                        );
+                    }
+                }
+            }
+            "decode" => {
+                if args.len() != 2 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.decode` takes exactly 2 arguments `(dst, src)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.decode(dst, src)`",
+                    );
+                } else {
+                    for a in args {
+                        if let Some(ref n) = a.name {
+                            if n != "dst" && n != "src" {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`hex.decode` has no parameter named `{}` (params: dst, src) (HYB-E1002)",
+                                        n
+                                    ),
+                                    "pass arguments by position or use valid parameter names `dst` and `src`",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            "encoded_len" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.encoded_len` takes exactly 1 argument `(n)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.encoded_len(n)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "n" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.encoded_len` has no parameter named `{}` (params: n) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `n`",
+                        );
+                    }
+                }
+            }
+            "decoded_len" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.decoded_len` takes exactly 1 argument `(x)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.decoded_len(x)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "x" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.decoded_len` has no parameter named `{}` (params: x) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `x`",
+                        );
+                    }
+                }
+            }
+            "dump" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.dump` takes exactly 1 argument `(data)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.dump(data)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "data" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.dump` has no parameter named `{}` (params: data) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `data`",
+                        );
+                    }
+                }
+            }
+            "dumper" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.dumper` takes exactly 1 argument `(w)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.dumper(w)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "w" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.dumper` has no parameter named `{}` (params: w) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `w`",
+                        );
+                    }
+                }
+            }
+            "new_decoder" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.new_decoder` takes exactly 1 argument `(r)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.new_decoder(r)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "r" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.new_decoder` has no parameter named `{}` (params: r) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `r`",
+                        );
+                    }
+                }
+            }
+            "new_encoder" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`hex.new_encoder` takes exactly 1 argument `(w)`, got {} (HYB-E1002)",
+                            args.len()
+                        ),
+                        "write `hex.new_encoder(w)`",
+                    );
+                } else if let Some(ref n) = args[0].name {
+                    if n != "w" {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`hex.new_encoder` has no parameter named `{}` (params: w) (HYB-E1002)",
+                                n
+                            ),
+                            "pass argument by position or use parameter name `w`",
+                        );
+                    }
                 }
             }
             _ => {}
